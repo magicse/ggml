@@ -177,47 +177,6 @@ bool gpt2_model_load(const std::string & fname, gpt2_model & model, gpt_vocab & 
 
     auto & ctx = model.ctx;
 
-    size_t buffer_size = 0;
-
-    {
-        const auto & hparams = model.hparams;
-
-        const int n_embd  = hparams.n_embd;
-        const int n_layer = hparams.n_layer;
-        const int n_ctx   = hparams.n_ctx;
-        const int n_vocab = hparams.n_vocab;
-
-        buffer_size += n_embd*ggml_type_sizef(GGML_TYPE_F32); // ln_f_g
-        buffer_size += n_embd*ggml_type_sizef(GGML_TYPE_F32); // ln_f_b
-
-        buffer_size += n_vocab*n_embd*ggml_type_sizef(wtype);         // wte
-        buffer_size +=   n_ctx*n_embd*ggml_type_sizef(GGML_TYPE_F32); // wpe
-        buffer_size += n_vocab*n_embd*ggml_type_sizef(wtype);         // lm_head
-
-        buffer_size += n_layer*(n_embd*ggml_type_sizef(GGML_TYPE_F32)); // ln_1_g
-        buffer_size += n_layer*(n_embd*ggml_type_sizef(GGML_TYPE_F32)); // ln_1_b
-
-        buffer_size += n_layer*(n_embd*ggml_type_sizef(GGML_TYPE_F32)); // ln_2_g
-        buffer_size += n_layer*(n_embd*ggml_type_sizef(GGML_TYPE_F32)); // ln_2_b
-
-        buffer_size += n_layer*(3*n_embd*n_embd*ggml_type_sizef(wtype));         // c_attn_attn_w
-        buffer_size += n_layer*(       3*n_embd*ggml_type_sizef(GGML_TYPE_F32)); // c_attn_attn_b
-
-        buffer_size += n_layer*(n_embd*n_embd*ggml_type_sizef(wtype));           // c_attn_proj_w
-        buffer_size += n_layer*(       n_embd*ggml_type_sizef(GGML_TYPE_F32));   // c_attn_proj_b
-
-        buffer_size += n_layer*(4*n_embd*n_embd*ggml_type_sizef(wtype));         // c_mlp_fc_w
-        buffer_size += n_layer*(       4*n_embd*ggml_type_sizef(GGML_TYPE_F32)); // c_mlp_fc_b
-
-        buffer_size += n_layer*(4*n_embd*n_embd*ggml_type_sizef(wtype));         // c_mlp_proj_w
-        buffer_size += n_layer*(         n_embd*ggml_type_sizef(GGML_TYPE_F32)); // c_mlp_proj_b
-
-        buffer_size += (6 + 12*n_layer)*128; // alignment overhead
-
-        printf("%s: ggml tensor size    = %d bytes\n", __func__, (int) sizeof(ggml_tensor));
-        printf("%s: backend buffer size = %6.2f MB\n", __func__, buffer_size/(1024.0*1024.0));
-    }
-
     // create the ggml context
     {
         size_t n_tensors = 2 + 6 + 12*model.hparams.n_layer;
@@ -227,8 +186,8 @@ bool gpt2_model_load(const std::string & fname, gpt2_model & model, gpt_vocab & 
             /*.no_alloc   =*/ true,
         };
 
-        model.ctx = ggml_init(params);
-        if (!model.ctx) {
+        ctx = ggml_init(params);
+        if (!ctx) {
             fprintf(stderr, "%s: ggml_init() failed\n", __func__);
             return false;
         }
@@ -267,10 +226,7 @@ bool gpt2_model_load(const std::string & fname, gpt2_model & model, gpt_vocab & 
         return false;
     }
 
-    // allocate weights buffer
-    model.buffer_w = ggml_backend_alloc_buffer(model.backend, buffer_size);
-
-    // prepare memory for the weights
+    // create the tensors for the model
     {
         const auto & hparams = model.hparams;
 
@@ -338,6 +294,12 @@ bool gpt2_model_load(const std::string & fname, gpt2_model & model, gpt_vocab & 
         }
     }
 
+    // allocate the model tensors in a backend buffer
+    model.buffer_w = ggml_backend_alloc_ctx_tensors(ctx, model.backend);
+
+    printf("%s: ggml tensor size    = %d bytes\n", __func__, (int) sizeof(ggml_tensor));
+    printf("%s: backend buffer size = %6.2f MB\n", __func__, ggml_backend_buffer_get_size(model.buffer_w)/(1024.0*1024.0));
+
     // override the default training context with the user-provided
     model.hparams.n_ctx = n_ctx;
 
@@ -378,8 +340,6 @@ bool gpt2_model_load(const std::string & fname, gpt2_model & model, gpt_vocab & 
 
     // load weights
     {
-        ggml_allocr * alloc = ggml_allocr_new_from_buffer(model.buffer_w);
-
         size_t total_size = 0;
 
         bool has_lm_head = false;
@@ -440,8 +400,6 @@ bool gpt2_model_load(const std::string & fname, gpt2_model & model, gpt_vocab & 
                 return false;
             }
 
-            ggml_allocr_alloc(alloc, tensor);
-
             if (ggml_backend_is_cpu  (model.backend)
 #ifdef GGML_USE_METAL
                 || ggml_backend_is_metal(model.backend)
@@ -470,7 +428,6 @@ bool gpt2_model_load(const std::string & fname, gpt2_model & model, gpt_vocab & 
             total_size += ggml_nbytes(tensor);
         }
 
-        ggml_allocr_free(alloc);
         printf("%s: model size  = %8.2f MB\n", __func__, total_size/1024.0/1024.0);
     }
 
